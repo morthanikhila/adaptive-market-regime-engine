@@ -1,132 +1,292 @@
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 
 
-def calculate_rsi(series, period=14):
+def calculate_rsi(
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """
+    Calculate RSI using Wilder's smoothing.
+    """
 
-    delta = series.diff()
+    delta = close.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
 
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
+    loss = -delta.clip(
+        upper=0
+    )
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period,
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period,
+    ).mean()
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (100 / (1 + rs))
+    rsi = 100 - (
+        100 / (1 + rs)
+    )
 
     return rsi
 
 
-def create_features(input_path, output_path):
+def calculate_atr(
+    df: pd.DataFrame,
+    period: int = 14,
+) -> pd.Series:
+    """
+    Calculate Average True Range using
+    Wilder's smoothing.
+    """
 
-    df = pd.read_csv(input_path)
+    previous_close = df["Close"].shift(1)
 
-    df["Date"] = pd.to_datetime(df["Date"])
+    true_range = pd.concat(
+        [
+            df["High"] - df["Low"],
+            (df["High"] - previous_close).abs(),
+            (df["Low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
 
-    df = df.sort_values("Date")
+    atr = true_range.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period,
+    ).mean()
 
-    # -----------------------------
-    # Returns
-    # -----------------------------
+    return atr
 
-    df["return_1d"] = df["Close"].pct_change()
 
-    df["return_5d"] = df["Close"].pct_change(5)
+def create_features(
+    input_path: str,
+    output_path: str,
+) -> pd.DataFrame:
+    """
+    Create the complete feature matrix.
+    """
 
-    df["return_20d"] = df["Close"].pct_change(20)
-
-    # -----------------------------
-    # Moving averages
-    # -----------------------------
-
-    df["ma_20"] = df["Close"].rolling(20).mean()
-
-    df["ma_50"] = df["Close"].rolling(50).mean()
-
-    df["ma_200"] = df["Close"].rolling(200).mean()
-
-    # -----------------------------
-    # Trend features
-    # -----------------------------
-
-    df["price_ma20_ratio"] = (
-        df["Close"] / df["ma_20"]
+    df = pd.read_csv(
+        input_path
     )
 
-    df["price_ma50_ratio"] = (
-        df["Close"] / df["ma_50"]
+    df["Date"] = pd.to_datetime(
+        df["Date"]
     )
 
-    # -----------------------------
-    # Volatility
-    # -----------------------------
+    df = df.sort_values(
+        "Date"
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
+
+    # ==================================================
+    # 1. RETURN
+    # ==================================================
+
+    df["return"] = (
+        df["Close"]
+        .pct_change()
+    )
+
+    # ==================================================
+    # 2. LOG RETURN
+    # ==================================================
+
+    df["log_return"] = np.log(
+        df["Close"]
+        / df["Close"].shift(1)
+    )
+
+    # ==================================================
+    # 3. 20-DAY VOLATILITY
+    # ==================================================
 
     df["volatility_20d"] = (
-        df["return_1d"]
-        .rolling(20)
+        df["log_return"]
+        .rolling(window=20)
         .std()
     )
 
-    df["volatility_5d"] = (
-        df["return_1d"]
-        .rolling(5)
-        .std()
-    )
-
-    # -----------------------------
-    # RSI
-    # -----------------------------
+    # ==================================================
+    # 4. RSI-14
+    # ==================================================
 
     df["rsi_14"] = calculate_rsi(
+        df["Close"],
+        period=14,
+    )
+
+    # ==================================================
+    # 5. MACD
+    # ==================================================
+
+    ema_12 = (
         df["Close"]
-    )
-
-    # -----------------------------
-    # Price range
-    # -----------------------------
-
-    df["high_low_range"] = (
-        (df["High"] - df["Low"])
-        / df["Close"]
-    )
-
-    df["open_close_range"] = (
-        (df["Close"] - df["Open"])
-        / df["Open"]
-    )
-
-    # -----------------------------
-    # Volume
-    # -----------------------------
-
-    df["volume_change"] = (
-        df["Volume"].pct_change()
-    )
-
-    df["volume_ma20"] = (
-        df["Volume"]
-        .rolling(20)
+        .ewm(
+            span=12,
+            adjust=False,
+        )
         .mean()
     )
 
-    df["volume_ratio"] = (
-        df["Volume"] / df["volume_ma20"]
+    ema_26 = (
+        df["Close"]
+        .ewm(
+            span=26,
+            adjust=False,
+        )
+        .mean()
     )
 
-    # -----------------------------
-    # Remove rows created by rolling
-    # calculations
-    # -----------------------------
+    df["macd"] = (
+        ema_12 - ema_26
+    )
 
-    df = df.dropna()
+    # ==================================================
+    # 6. MACD SIGNAL
+    # ==================================================
 
-    df = df.reset_index(drop=True)
+    df["macd_signal"] = (
+        df["macd"]
+        .ewm(
+            span=9,
+            adjust=False,
+        )
+        .mean()
+    )
+
+    # ==================================================
+    # 7. MACD HISTOGRAM
+    # ==================================================
+
+    df["macd_histogram"] = (
+        df["macd"]
+        - df["macd_signal"]
+    )
+
+    # ==================================================
+    # 8. ATR-14
+    # ==================================================
+
+    df["atr_14"] = calculate_atr(
+        df,
+        period=14,
+    )
+
+    # ==================================================
+    # 9. VOLUME CHANGE
+    # ==================================================
+
+    previous_volume = (
+        df["Volume"].shift(1)
+    )
+
+    df["volume_change"] = np.where(
+        previous_volume > 0,
+        (
+            df["Volume"]
+            / previous_volume
+        ) - 1,
+        0.0,
+    )
+
+    # ==================================================
+    # 10. VOLUME MA-20
+    # ==================================================
+
+    df["volume_ma_20"] = (
+        df["Volume"]
+        .rolling(window=20)
+        .mean()
+    )
+
+    # ==================================================
+    # Remove rows where indicators are not available
+    # ==================================================
+
+    feature_columns = [
+        "return",
+        "log_return",
+        "volatility_20d",
+        "rsi_14",
+        "macd",
+        "macd_signal",
+        "macd_histogram",
+        "atr_14",
+        "volume_change",
+        "volume_ma_20",
+    ]
+
+    df = df.dropna(
+        subset=feature_columns
+    )
+
+    # ==================================================
+    # Replace any remaining infinities
+    # ==================================================
+
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    df = df.dropna(
+        subset=feature_columns
+    )
+
+    # ==================================================
+    # Final validation
+    # ==================================================
+
+    numeric_columns = [
+        column
+        for column in df.columns
+        if column != "Date"
+    ]
+
+    if not np.isfinite(
+        df[numeric_columns]
+        .to_numpy()
+    ).all():
+
+        raise ValueError(
+            "Feature matrix contains "
+            "NaN or infinite values."
+        )
+
+    # ==================================================
+    # Save
+    # ==================================================
+
+    output = Path(
+        output_path
+    )
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     df.to_csv(
-        output_path,
-        index=False
+        output,
+        index=False,
     )
 
     return df
@@ -134,16 +294,41 @@ def create_features(input_path, output_path):
 
 if __name__ == "__main__":
 
-    df = create_features(
+    features = create_features(
         "data/processed/nifty50_clean.csv",
-        "data/features/nifty50_features.csv"
+        "data/features/nifty50_features.csv",
     )
 
-    print("\nFeature matrix created.")
-    print("Shape:", df.shape)
+    print(
+        "\nFeature engineering completed."
+    )
 
-    print("\nColumns:")
-    print(df.columns.tolist())
+    print(
+        f"Rows: {len(features)}"
+    )
 
-    print("\nFirst rows:")
-    print(df.head())
+    print(
+        f"Columns: {len(features.columns)}"
+    )
+
+    print(
+        f"Date range: "
+        f"{features['Date'].min()} -> "
+        f"{features['Date'].max()}"
+    )
+
+    print(
+        "\nFeature columns:"
+    )
+
+    print(
+        features.columns.tolist()
+    )
+
+    print(
+        "\nFinal dataset shape:"
+    )
+
+    print(
+        features.shape
+    )

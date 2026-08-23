@@ -1,51 +1,211 @@
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 
 
-def clean_market_data(input_path, output_path):
+REQUIRED_COLUMNS = [
+    "Date",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+]
+
+
+def load_raw_data(
+    input_path: str,
+) -> pd.DataFrame:
+    """
+    Load raw OHLCV CSV.
+    """
 
     df = pd.read_csv(input_path)
 
-    df["Date"] = pd.to_datetime(df["Date"])
+    missing = [
+        column
+        for column in REQUIRED_COLUMNS
+        if column not in df.columns
+    ]
 
-    df = df.sort_values("Date")
+    if missing:
+        raise ValueError(
+            f"Missing columns: {missing}"
+        )
 
-    df = df.drop_duplicates(subset=["Date"])
+    return df
+
+
+def clean_market_data(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Clean and validate OHLCV market data.
+    """
+
+    df = df.copy()
+
+    # -------------------------
+    # Date
+    # -------------------------
+
+    df["Date"] = pd.to_datetime(
+        df["Date"],
+        errors="coerce",
+    )
+
+    # -------------------------
+    # Numeric columns
+    # -------------------------
 
     numeric_columns = [
         "Open",
         "High",
         "Low",
         "Close",
-        "Volume"
+        "Volume",
     ]
 
     for column in numeric_columns:
         df[column] = pd.to_numeric(
             df[column],
-            errors="coerce"
+            errors="coerce",
         )
+
+    # -------------------------
+    # Remove invalid dates
+    # -------------------------
+
+    df = df.dropna(
+        subset=["Date"]
+    )
+
+    # -------------------------
+    # Sort chronologically
+    # -------------------------
+
+    df = df.sort_values("Date")
+
+    # -------------------------
+    # Remove duplicate dates
+    # -------------------------
+
+    df = df.drop_duplicates(
+        subset="Date",
+        keep="first",
+    )
+
+    # -------------------------
+    # Remove missing OHLCV
+    # -------------------------
 
     df = df.dropna(
         subset=numeric_columns
     )
 
-    df = df.reset_index(drop=True)
+    # -------------------------
+    # Remove invalid prices
+    # -------------------------
 
-    df.to_csv(
-        output_path,
-        index=False
+    price_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+    ]
+
+    for column in price_columns:
+        df = df[
+            df[column] > 0
+        ]
+
+    # -------------------------
+    # Volume cannot be negative
+    # -------------------------
+
+    df = df[
+        df["Volume"] >= 0
+    ]
+
+    # -------------------------
+    # OHLC consistency
+    # -------------------------
+
+    df = df[
+        df["High"] >= df["Low"]
+    ]
+
+    df = df[
+        (df["Open"] >= df["Low"])
+        & (df["Open"] <= df["High"])
+    ]
+
+    df = df[
+        (df["Close"] >= df["Low"])
+        & (df["Close"] <= df["High"])
+    ]
+
+    # -------------------------
+    # Remove infinities
+    # -------------------------
+
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    df = df.dropna()
+
+    # -------------------------
+    # Final ordering
+    # -------------------------
+
+    df = df[
+        REQUIRED_COLUMNS
+    ]
+
+    df = df.reset_index(
+        drop=True
     )
 
     return df
 
 
-if __name__ == "__main__":
+def save_clean_data(
+    df: pd.DataFrame,
+    output_path: str = "data/processed/nifty50_clean.csv",
+) -> None:
 
-    df = clean_market_data(
-        "data/raw/nifty50_raw.csv",
-        "data/processed/nifty50_clean.csv"
+    output = Path(output_path)
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    print("Cleaned data shape:", df.shape)
-    print(df.head())
-    print(df.isnull().sum())
+    df.to_csv(
+        output,
+        index=False,
+    )
+
+
+if __name__ == "__main__":
+
+    raw = load_raw_data(
+        "data/raw/nifty50_raw.csv"
+    )
+
+    clean = clean_market_data(raw)
+
+    save_clean_data(clean)
+
+    print("Preprocessing completed.")
+    print(f"Rows: {len(clean)}")
+    print(
+        f"Date range: "
+        f"{clean['Date'].min()} -> "
+        f"{clean['Date'].max()}"
+    )
+    print("Saved to:")
+    print("data/processed/nifty50_clean.csv")
